@@ -1,0 +1,155 @@
+{
+  "models": [
+    {
+      "model_name": "xgboost",
+      "model_type": "xgboost",
+      "version": "v2.0",
+      "timestamp": "2026-02-18T14:02:18.522241",
+      "metrics": {
+        "accuracy": 0.7597,
+        "precision": 0.6667,
+        "recall": 0.6296,
+        "f1_score": 0.6476,
+        "roc_auc": 0.8296,
+        "confusion_matrix": [
+          [
+            83,
+            17
+          ],
+          [
+            20,
+            34
+          ]
+        ]
+      },
+      "status": "champion",
+      "model_path": "model/versions/xgboost_v2.0.json"
+    },
+    {
+      "model_name": "randomforest",
+      "model_type": "sklearn",
+      "version": "v1.0",
+      "timestamp": "2026-02-18T14:02:18.885174",
+      "metrics": {
+        "accuracy": 0.7532,
+        "precision": 0.6739,
+        "recall": 0.5741,
+        "f1_score": 0.62,
+        "roc_auc": 0.8063,
+        "confusion_matrix": [
+          [
+            85,
+            15
+          ],
+          [
+            23,
+            31
+          ]
+        ]
+      },
+      "status": "challenger",
+      "model_path": "model/versions/randomforest_v1.0.pkl"
+    },
+    {
+      "model_name": "logistic",
+      "model_type": "sklearn",
+      "version": "v1.0",
+      "timestamp": "2026-02-18T14:02:18.926505",
+      "metrics": {
+        "accuracy": 0.7078,
+        "precision": 0.6,
+        "recall": 0.5,
+        "f1_score": 0.5455,
+        "roc_auc": 0.813,
+        "confusion_matrix": [
+          [
+            82,
+            18
+          ],
+          [
+            27,
+            27
+          ]
+        ]
+      },
+      "status": "challenger",
+      "model_path": "model/versions/logistic_v1.0.pkl"
+    },
+    {
+      "model_name": "xgboost",
+      "model_type": "xgboost",
+      "version": "v2.0",
+      "timestamp": "2026-02-18T14:05:50.571758",
+      "metrics": {
+        "accuracy": 0.7597,
+        "precision": 0.6667,
+        "recall": 0.6296,
+        "f1_score": 0.6476,
+        "roc_auc": 0.8296,
+        "confusion_matrix": [
+          [
+            83,
+            17
+          ],
+          [
+            20,
+            34
+          ]
+        ]
+      },
+      "status": "champion",
+      "model_path": "model/versions/xgboost_v2.0.json"
+    },
+    {
+      "model_name": "randomforest",
+      "model_type": "sklearn",
+      "version": "v1.0",
+      "timestamp": "2026-02-18T14:05:50.896439",
+      "metrics": {
+        "accuracy": 0.7532,
+        "precision": 0.6739,
+        "recall": 0.5741,
+        "f1_score": 0.62,
+        "roc_auc": 0.8063,
+        "confusion_matrix": [
+          [
+            85,
+            15
+          ],
+          [
+            23,
+            31
+          ]
+        ]
+      },
+      "status": "challenger",
+      "model_path": "model/versions/randomforest_v1.0.pkl"
+    },
+    {
+      "model_name": "logistic",
+      "model_type": "sklearn",
+      "version": "v1.0",
+      "timestamp": "2026-02-18T14:05:50.925827",
+      "metrics": {
+        "accuracy": 0.7078,
+        "precision": 0.6,
+        "recall": 0.5,
+        "f1_score": 0.5455,
+        "roc_auc": 0.813,
+        "confusion_matrix": [
+          [
+            82,
+            18
+          ],
+          [
+            27,
+            27
+          ]
+        ]
+      },
+      "status": "challenger",
+      "model_path": "model/versions/logistic_v1.0.pkl"
+    }
+  ],
+  "champion": "xgboost"
+}
