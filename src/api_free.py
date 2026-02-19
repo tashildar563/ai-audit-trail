@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import os
 from scipy import stats
 import numpy as np
+import pandas as pd
 
 from src.database import get_db, Client, Prediction, FairnessAudit, init_db
 
