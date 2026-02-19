@@ -26,14 +26,20 @@ class Client(Base):
     __tablename__ = "clients"
     
     client_id = Column(String, primary_key=True, index=True)
-    company_name = Column(String, nullable=False)
+    company_name = Column(String, nullable=False, unique=True)  # Add unique=True
+    email = Column(String, unique=True, index=True)  # Add this line
     api_key = Column(String, unique=True, nullable=False, index=True)
-    api_key_hash = Column(String, nullable=False)  # Store hashed version
+    api_key_hash = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     plan = Column(String, default="free")
     is_active = Column(Boolean, default=True)
     usage_limit = Column(Integer, default=1000)
     usage_count = Column(Integer, default=0)
+    
+    # Relationships
+    predictions = relationship("Prediction", back_populates="client", cascade="all, delete-orphan")
+    fairness_audits = relationship("FairnessAudit", back_populates="client")
+    drift_alerts = relationship("DriftAlert", back_populates="client")
     
     # Relationships
     predictions = relationship("Prediction", back_populates="client", cascade="all, delete-orphan")

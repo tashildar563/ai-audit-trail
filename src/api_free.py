@@ -71,7 +71,45 @@ def verify_api_key(
 
 # ══════════════════════════════════════════════════════════
 # ENDPOINTS
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════class LoginRequest(BaseModel):
+    email: str
+    company_name: str
+
+class LoginRequest(BaseModel):
+ email: str
+ company_name: str
+
+
+@app.post("/api/v1/login")
+async def login_client(request: LoginRequest, db: Session = Depends(get_db)):
+    """Login and retrieve API key"""
+    
+    # Find client by email and company name
+    client = db.query(Client).filter(
+        Client.email == request.email,
+        Client.company_name == request.company_name
+    ).first()
+    
+    if not client:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials. Please check your email and company name."
+        )
+    
+    if not client.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Account is inactive. Please contact support."
+        )
+    
+    return {
+        "client_id": client.client_id,
+        "api_key": client.api_key,
+        "company_name": client.company_name,
+        "plan": client.plan,
+        "message": "Login successful!"
+    }
+
 
 @app.get("/")
 async def root():
@@ -97,7 +135,29 @@ async def health():
 
 @app.post("/api/v1/register")
 async def register_client(request: RegisterRequest, db: Session = Depends(get_db)):
-    """Register new client"""
+    """Register new client with duplicate prevention"""
+    
+    # Check if company name already exists
+    existing_company = db.query(Client).filter(
+        Client.company_name == request.company_name
+    ).first()
+    
+    if existing_company:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Company name '{request.company_name}' is already registered. Please use a different name or contact support to recover your API key."
+        )
+    
+    # Check if email already exists
+    existing_email = db.query(Client).filter(
+        Client.email == request.email
+    ).first()
+    
+    if existing_email:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Email '{request.email}' is already registered. Please use a different email or login to retrieve your API key."
+        )
     
     client_id = f"client_{secrets.token_urlsafe(8)}"
     api_key = f"sk_{secrets.token_urlsafe(32)}"
@@ -110,7 +170,8 @@ async def register_client(request: RegisterRequest, db: Session = Depends(get_db
         api_key=api_key,
         api_key_hash=secrets.token_hex(32),
         plan=request.plan,
-        usage_limit=usage_limits.get(request.plan, 1000)
+        usage_limit=usage_limits.get(request.plan, 1000),
+        email=request.email  # Make sure to add email field to Client model
     )
     
     db.add(client)
