@@ -50,3 +50,11 @@ model/versions/*.json
 # Keep directory structure but ignore contents
 !logs/.gitkeep
 !model/versions/.gitkeep
+
+# Database files
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
