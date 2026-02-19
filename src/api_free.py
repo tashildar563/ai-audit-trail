@@ -6,6 +6,8 @@ from typing import Optional, Dict, Any
 import secrets
 from datetime import datetime, timedelta
 import os
+from scipy import stats
+import numpy as np
 
 from src.database import get_db, Client, Prediction, FairnessAudit, init_db
 
@@ -274,6 +276,256 @@ async def get_dashboard(
         "models": [m[0] for m in models]
     }
 
+# ... existing imports and code ...
+
+class FairnessCheckRequest(BaseModel):
+    model_name: str
+    protected_attribute: str
+    lookback_days: int = 7
+
+
+class DriftCheckRequest(BaseModel):
+    model_name: str
+    feature: str
+    lookback_days: int = 7
+    reference_days: int = 30
+
+
+@app.post("/api/v1/check_fairness")
+async def check_fairness(
+    request: FairnessCheckRequest,
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Run fairness analysis on recent predictions
+    """
+    from datetime import timedelta
+    
+    # Fetch recent predictions
+    cutoff_date = datetime.utcnow() - timedelta(days=request.lookback_days)
+    
+    predictions = db.query(Prediction).filter(
+        Prediction.client_id == client.client_id,
+        Prediction.model_name == request.model_name,
+        Prediction.timestamp >= cutoff_date
+    ).all()
+    
+    if len(predictions) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 10 predictions for fairness analysis. Found: {len(predictions)}"
+        )
+    
+    # Extract data
+    data = []
+    for pred in predictions:
+        protected_value = pred.features.get(request.protected_attribute)
+        prediction_class = pred.prediction.get('class')
+        
+        if protected_value is not None and prediction_class is not None:
+            data.append({
+                'protected_attr': str(protected_value),
+                'prediction': prediction_class,
+                'confidence': pred.confidence
+            })
+    
+    if not data:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Protected attribute '{request.protected_attribute}' not found in predictions"
+        )
+    
+    df = pd.DataFrame(data)
+    
+    # Calculate metrics by group
+    groups = df.groupby('protected_attr')
+    metrics_by_group = {}
+    
+    for group_name, group_df in groups:
+        total = len(group_df)
+        
+        # Assume positive class is any prediction that's not "denied" or "no" or similar
+        positive_predictions = group_df[
+            ~group_df['prediction'].str.lower().isin(['denied', 'no', 'rejected', 'negative', 'low risk'])
+        ]
+        positive_rate = len(positive_predictions) / total if total > 0 else 0
+        
+        metrics_by_group[group_name] = {
+            'sample_size': total,
+            'positive_rate': round(float(positive_rate), 4),
+            'avg_confidence': round(float(group_df['confidence'].mean()), 4)
+        }
+    
+    # Calculate disparate impact
+    rates = [m['positive_rate'] for m in metrics_by_group.values() if m['positive_rate'] > 0]
+    if len(rates) < 2:
+        disparate_impact = 1.0
+    else:
+        disparate_impact = min(rates) / max(rates)
+    
+    passes_80_rule = 0.8 <= disparate_impact <= 1.25
+    
+    # Save to database
+    fairness_audit = FairnessAudit(
+        client_id=client.client_id,
+        model_name=request.model_name,
+        protected_attribute=request.protected_attribute,
+        metrics={
+            'groups': metrics_by_group,
+            'disparate_impact': round(float(disparate_impact), 4),
+            'passes_80_rule': passes_80_rule
+        },
+        status='FAIR' if passes_80_rule else 'BIAS_DETECTED'
+    )
+    db.add(fairness_audit)
+    db.commit()
+    
+    return {
+        'model_name': request.model_name,
+        'protected_attribute': request.protected_attribute,
+        'analysis_period_days': request.lookback_days,
+        'total_predictions': len(predictions),
+        'metrics_by_group': metrics_by_group,
+        'disparate_impact_ratio': round(float(disparate_impact), 4),
+        'passes_80_rule': passes_80_rule,
+        'status': 'FAIR' if passes_80_rule else 'BIAS_DETECTED',
+        'timestamp': datetime.utcnow().isoformat()
+    }
+
+
+@app.post("/api/v1/detect_drift")
+async def detect_drift(
+    request: DriftCheckRequest,
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Detect data drift in recent predictions
+    """
+    from datetime import timedelta
+    
+    # Fetch recent data
+    recent_cutoff = datetime.utcnow() - timedelta(days=request.lookback_days)
+    recent_predictions = db.query(Prediction).filter(
+        Prediction.client_id == client.client_id,
+        Prediction.model_name == request.model_name,
+        Prediction.timestamp >= recent_cutoff
+    ).all()
+    
+    # Fetch reference data
+    reference_start = datetime.utcnow() - timedelta(days=request.reference_days + request.lookback_days)
+    reference_end = datetime.utcnow() - timedelta(days=request.lookback_days)
+    reference_predictions = db.query(Prediction).filter(
+        Prediction.client_id == client.client_id,
+        Prediction.model_name == request.model_name,
+        Prediction.timestamp >= reference_start,
+        Prediction.timestamp < reference_end
+    ).all()
+    
+    if len(recent_predictions) < 5 or len(reference_predictions) < 5:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient data. Recent: {len(recent_predictions)}, Reference: {len(reference_predictions)}"
+        )
+    
+    # Extract feature values
+    recent_values = [p.features.get(request.feature) for p in recent_predictions]
+    reference_values = [p.features.get(request.feature) for p in reference_predictions]
+    
+    # Remove None values
+    recent_values = [v for v in recent_values if v is not None]
+    reference_values = [v for v in reference_values if v is not None]
+    
+    if len(recent_values) < 5 or len(reference_values) < 5:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Feature '{request.feature}' not found or insufficient data"
+        )
+    
+    # Kolmogorov-Smirnov test
+    ks_stat, p_value = stats.ks_2samp(reference_values, recent_values)
+    
+    drift_detected = p_value < 0.05
+    severity = 'HIGH' if p_value < 0.01 else 'MEDIUM' if drift_detected else 'LOW'
+    
+    # Save alert if drift detected
+    if drift_detected:
+        drift_alert = DriftAlert(
+            client_id=client.client_id,
+            model_name=request.model_name,
+            feature=request.feature,
+            drift_score=float(ks_stat),
+            severity=severity
+        )
+        db.add(drift_alert)
+        db.commit()
+    
+    return {
+        'model_name': request.model_name,
+        'feature': request.feature,
+        'drift_detected': drift_detected,
+        'ks_statistic': round(float(ks_stat), 4),
+        'p_value': round(float(p_value), 4),
+        'severity': severity,
+        'reference_period_days': request.reference_days,
+        'recent_period_days': request.lookback_days,
+        'reference_samples': len(reference_values),
+        'recent_samples': len(recent_values),
+        'timestamp': datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/api/v1/fairness/history")
+async def get_fairness_history(
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """Get fairness audit history"""
+    
+    audits = db.query(FairnessAudit).filter(
+        FairnessAudit.client_id == client.client_id
+    ).order_by(FairnessAudit.timestamp.desc()).limit(10).all()
+    
+    return {
+        'audits': [
+            {
+                'id': audit.id,
+                'model_name': audit.model_name,
+                'protected_attribute': audit.protected_attribute,
+                'status': audit.status,
+                'metrics': audit.metrics,
+                'timestamp': audit.timestamp.isoformat()
+            }
+            for audit in audits
+        ]
+    }
+
+
+@app.get("/api/v1/drift/history")
+async def get_drift_history(
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """Get drift alert history"""
+    
+    alerts = db.query(DriftAlert).filter(
+        DriftAlert.client_id == client.client_id
+    ).order_by(DriftAlert.timestamp.desc()).limit(10).all()
+    
+    return {
+        'alerts': [
+            {
+                'id': alert.id,
+                'model_name': alert.model_name,
+                'feature': alert.feature,
+                'drift_score': alert.drift_score,
+                'severity': alert.severity,
+                'timestamp': alert.timestamp.isoformat()
+            }
+            for alert in alerts
+        ]
+    }
 
 @app.on_event("startup")
 async def startup():
