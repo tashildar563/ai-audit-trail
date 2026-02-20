@@ -741,6 +741,467 @@ async def get_compliance_summary(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Add these imports at the top
+from src.performance_calculator import PerformanceCalculator
+from src.database import PerformanceMetrics, PerformanceAlert
+
+# ... existing code ...
+
+# Add these Pydantic models after existing models
+
+class RecordOutcomeRequest(BaseModel):
+    prediction_id: str
+    actual_outcome: dict
+    feedback_notes: Optional[str] = None
+
+
+class CalculatePerformanceRequest(BaseModel):
+    model_name: str
+    period_days: int = 30
+    thresholds: Optional[dict] = None
+
+
+# ══════════════════════════════════════════════════════════
+# GROUND TRUTH & PERFORMANCE ENDPOINTS
+# ══════════════════════════════════════════════════════════
+
+@app.post("/api/v1/track_outcome")
+async def record_actual_outcome(
+    request: RecordOutcomeRequest,
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Record the actual outcome for a prediction (ground truth)
+    
+    Request body:
+    {
+        "prediction_id": "pred_abc123",
+        "actual_outcome": {
+            "class": "denied",  # or "approved", etc.
+            "reason": "customer defaulted"  # optional
+        },
+        "feedback_notes": "Customer defaulted after 3 months"  # optional
+    }
+    
+    Use this endpoint when you know the actual outcome of a prediction.
+    For example:
+    - Loan prediction: Did customer actually default?
+    - Fraud prediction: Was transaction actually fraudulent?
+    - Hiring prediction: Did candidate succeed in role?
+    """
+    try:
+        # Find the prediction
+        prediction = db.query(Prediction).filter(
+            Prediction.client_id == client.client_id,
+            Prediction.prediction_id == request.prediction_id
+        ).first()
+        
+        if not prediction:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Prediction '{request.prediction_id}' not found"
+            )
+        
+        # Check if outcome already recorded
+        if prediction.actual_outcome is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Outcome already recorded for this prediction",
+                    "existing_outcome": prediction.actual_outcome,
+                    "recorded_at": prediction.outcome_timestamp.isoformat() if prediction.outcome_timestamp else None
+                }
+            )
+        
+        # Update prediction with actual outcome
+        prediction.actual_outcome = request.actual_outcome
+        prediction.outcome_timestamp = datetime.utcnow()
+        prediction.feedback_notes = request.feedback_notes
+        
+        db.commit()
+        db.refresh(prediction)
+        
+        # Count how many predictions now have outcomes for this model
+        total_predictions = db.query(Prediction).filter(
+            Prediction.client_id == client.client_id,
+            Prediction.model_name == prediction.model_name
+        ).count()
+        
+        predictions_with_outcomes = db.query(Prediction).filter(
+            Prediction.client_id == client.client_id,
+            Prediction.model_name == prediction.model_name,
+            Prediction.actual_outcome.isnot(None)
+        ).count()
+        
+        coverage_percentage = (predictions_with_outcomes / total_predictions * 100) if total_predictions > 0 else 0
+        
+        return {
+            "status": "outcome_recorded",
+            "prediction_id": request.prediction_id,
+            "model_name": prediction.model_name,
+            "predicted": prediction.prediction,
+            "actual": request.actual_outcome,
+            "timestamp": prediction.outcome_timestamp.isoformat(),
+            "coverage": {
+                "total_predictions": total_predictions,
+                "with_outcomes": predictions_with_outcomes,
+                "percentage": round(coverage_percentage, 2)
+            },
+            "message": f"Outcome recorded. {predictions_with_outcomes}/{total_predictions} predictions now have outcomes for this model."
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to record outcome: {str(e)}"
+        )
+
+
+@app.post("/api/v1/performance/calculate")
+async def calculate_performance_metrics(
+    request: CalculatePerformanceRequest,
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate performance metrics for a model
+    
+    Request body:
+    {
+        "model_name": "loan_approval_v1",
+        "period_days": 30,  # optional, default 30
+        "thresholds": {  # optional, for alert triggering
+            "accuracy": 0.85,
+            "precision": 0.80,
+            "recall": 0.80,
+            "f1_score": 0.80
+        }
+    }
+    
+    Returns:
+    - Accuracy, Precision, Recall, F1 Score
+    - Confusion matrix
+    - Per-class metrics (for multiclass)
+    - Performance alerts (if below thresholds)
+    """
+    try:
+        calculator = PerformanceCalculator(db)
+        
+        # Calculate metrics
+        metrics = calculator.calculate_metrics(
+            client_id=client.client_id,
+            model_name=request.model_name,
+            period_days=request.period_days
+        )
+        
+        # Check for errors
+        if 'error' in metrics:
+            return {
+                "status": "insufficient_data",
+                "error": metrics['error'],
+                "total_predictions": metrics.get('total_predictions', 0),
+                "predictions_with_outcomes": metrics.get('predictions_with_outcomes', 0),
+                "message": "Not enough data to calculate performance. Record actual outcomes using /api/v1/track_outcome endpoint."
+            }
+        
+        # Save metrics to database
+        calculator.save_metrics(
+            client_id=client.client_id,
+            model_name=request.model_name,
+            metrics=metrics,
+            period_days=request.period_days
+        )
+        
+        # Check for performance degradation
+        alerts = []
+        if request.thresholds:
+            alerts = calculator.check_for_degradation(
+                client_id=client.client_id,
+                model_name=request.model_name,
+                current_metrics=metrics,
+                thresholds=request.thresholds
+            )
+        
+        # Increment usage
+        client.usage_count += 1
+        db.commit()
+        
+        return {
+            "status": "success",
+            "model_name": request.model_name,
+            "period_days": request.period_days,
+            "metrics": metrics,
+            "alerts": alerts,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Performance calculation failed: {str(e)}"
+        )
+
+
+@app.get("/api/v1/performance/history/{model_name}")
+async def get_performance_history(
+    model_name: str,
+    limit: int = 10,
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Get historical performance metrics for a model
+    
+    Returns the last N performance calculations
+    """
+    try:
+        metrics = db.query(PerformanceMetrics).filter(
+            PerformanceMetrics.client_id == client.client_id,
+            PerformanceMetrics.model_name == model_name
+        ).order_by(PerformanceMetrics.calculated_at.desc()).limit(limit).all()
+        
+        history = []
+        for metric in metrics:
+            history.append({
+                "id": metric.id,
+                "period_start": metric.period_start.isoformat(),
+                "period_end": metric.period_end.isoformat(),
+                "calculated_at": metric.calculated_at.isoformat(),
+                "total_predictions": metric.total_predictions,
+                "predictions_with_outcomes": metric.predictions_with_outcomes,
+                "accuracy": metric.accuracy,
+                "precision": metric.precision_score,
+                "recall": metric.recall_score,
+                "f1_score": metric.f1_score,
+                "confusion_matrix": metric.confusion_matrix,
+                "class_metrics": metric.class_metrics
+            })
+        
+        return {
+            "model_name": model_name,
+            "history": history,
+            "count": len(history)
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve history: {str(e)}"
+        )
+
+
+@app.get("/api/v1/performance/alerts")
+async def get_performance_alerts(
+    status: str = "active",  # active, acknowledged, resolved, all
+    limit: int = 20,
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Get performance alerts
+    
+    Query params:
+    - status: active (default), acknowledged, resolved, all
+    - limit: number of alerts to return (default 20)
+    """
+    try:
+        query = db.query(PerformanceAlert).filter(
+            PerformanceAlert.client_id == client.client_id
+        )
+        
+        if status != "all":
+            query = query.filter(PerformanceAlert.status == status)
+        
+        alerts = query.order_by(
+            PerformanceAlert.triggered_at.desc()
+        ).limit(limit).all()
+        
+        result = []
+        for alert in alerts:
+            result.append({
+                "id": alert.id,
+                "model_name": alert.model_name,
+                "alert_type": alert.alert_type,
+                "severity": alert.severity,
+                "metric_name": alert.metric_name,
+                "current_value": alert.current_value,
+                "threshold_value": alert.threshold_value,
+                "previous_value": alert.previous_value,
+                "status": alert.status,
+                "triggered_at": alert.triggered_at.isoformat(),
+                "acknowledged_at": alert.acknowledged_at.isoformat() if alert.acknowledged_at else None,
+                "resolved_at": alert.resolved_at.isoformat() if alert.resolved_at else None
+            })
+        
+        return {
+            "alerts": result,
+            "count": len(result),
+            "status_filter": status
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve alerts: {str(e)}"
+        )
+
+
+@app.patch("/api/v1/performance/alerts/{alert_id}")
+async def update_alert_status(
+    alert_id: int,
+    status: str,  # acknowledged, resolved
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Update alert status (acknowledge or resolve)
+    
+    Path: /api/v1/performance/alerts/123?status=acknowledged
+    """
+    try:
+        alert = db.query(PerformanceAlert).filter(
+            PerformanceAlert.id == alert_id,
+            PerformanceAlert.client_id == client.client_id
+        ).first()
+        
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        
+        if status == "acknowledged":
+            alert.status = "acknowledged"
+            alert.acknowledged_at = datetime.utcnow()
+            alert.acknowledged_by = client.client_id
+        elif status == "resolved":
+            alert.status = "resolved"
+            alert.resolved_at = datetime.utcnow()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid status. Use 'acknowledged' or 'resolved'"
+            )
+        
+        db.commit()
+        
+        return {
+            "status": "updated",
+            "alert_id": alert_id,
+            "new_status": status,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update alert: {str(e)}"
+        )
+
+
+@app.get("/api/v1/performance/summary")
+async def get_performance_summary(
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Get performance summary across all models
+    
+    Returns overview of:
+    - Total predictions with outcomes
+    - Average accuracy across models
+    - Active alerts
+    - Models needing attention
+    """
+    try:
+        # Get all models for this client
+        models = db.query(Prediction.model_name).filter(
+            Prediction.client_id == client.client_id
+        ).distinct().all()
+        
+        model_names = [m[0] for m in models]
+        
+        summary = {
+            "total_models": len(model_names),
+            "models": [],
+            "overall_stats": {
+                "total_predictions": 0,
+                "predictions_with_outcomes": 0,
+                "coverage_percentage": 0
+            },
+            "active_alerts": 0
+        }
+        
+        total_preds = 0
+        total_with_outcomes = 0
+        
+        for model_name in model_names:
+            # Get latest metrics
+            latest_metric = db.query(PerformanceMetrics).filter(
+                PerformanceMetrics.client_id == client.client_id,
+                PerformanceMetrics.model_name == model_name
+            ).order_by(PerformanceMetrics.calculated_at.desc()).first()
+            
+            # Count predictions
+            model_total = db.query(Prediction).filter(
+                Prediction.client_id == client.client_id,
+                Prediction.model_name == model_name
+            ).count()
+            
+            model_with_outcomes = db.query(Prediction).filter(
+                Prediction.client_id == client.client_id,
+                Prediction.model_name == model_name,
+                Prediction.actual_outcome.isnot(None)
+            ).count()
+            
+            total_preds += model_total
+            total_with_outcomes += model_with_outcomes
+            
+            model_info = {
+                "model_name": model_name,
+                "total_predictions": model_total,
+                "predictions_with_outcomes": model_with_outcomes,
+                "coverage_percentage": round(model_with_outcomes / model_total * 100, 2) if model_total > 0 else 0,
+                "latest_metrics": None
+            }
+            
+            if latest_metric:
+                model_info["latest_metrics"] = {
+                    "accuracy": latest_metric.accuracy,
+                    "precision": latest_metric.precision_score,
+                    "recall": latest_metric.recall_score,
+                    "f1_score": latest_metric.f1_score,
+                    "calculated_at": latest_metric.calculated_at.isoformat()
+                }
+            
+            summary["models"].append(model_info)
+        
+        # Overall stats
+        summary["overall_stats"]["total_predictions"] = total_preds
+        summary["overall_stats"]["predictions_with_outcomes"] = total_with_outcomes
+        summary["overall_stats"]["coverage_percentage"] = round(
+            total_with_outcomes / total_preds * 100, 2
+        ) if total_preds > 0 else 0
+        
+        # Active alerts count
+        active_alerts_count = db.query(PerformanceAlert).filter(
+            PerformanceAlert.client_id == client.client_id,
+            PerformanceAlert.status == "active"
+        ).count()
+        
+        summary["active_alerts"] = active_alerts_count
+        
+        return summary
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate summary: {str(e)}"
+        )
+
+
 @app.on_event("startup")
 async def startup():
     """Initialize on startup"""

@@ -113,6 +113,87 @@ def get_db():
     finally:
         db.close()
 
+# Add to existing imports
+from sqlalchemy import Float, Text
+
+# ... existing code ...
+
+# Add after existing models (Client, Prediction, etc.)
+
+class PerformanceMetrics(Base):
+    """Store calculated performance metrics"""
+    __tablename__ = "performance_metrics"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(String, ForeignKey("clients.client_id"), nullable=False)
+    model_name = Column(String, nullable=False, index=True)
+    
+    # Time period
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+    
+    # Sample sizes
+    total_predictions = Column(Integer, nullable=False)
+    predictions_with_outcomes = Column(Integer, nullable=False)
+    
+    # Classification metrics
+    accuracy = Column(Float)
+    precision_score = Column(Float)
+    recall_score = Column(Float)
+    f1_score = Column(Float)
+    
+    # Confusion matrix and per-class metrics
+    confusion_matrix = Column(JSON)
+    class_metrics = Column(JSON)
+    
+    # Regression metrics
+    mae = Column(Float)
+    rmse = Column(Float)
+    r2_score = Column(Float)
+    
+    # Metadata
+    calculated_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    client = relationship("Client", back_populates="performance_metrics")
+
+
+class PerformanceAlert(Base):
+    """Store performance degradation alerts"""
+    __tablename__ = "performance_alerts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(String, ForeignKey("clients.client_id"), nullable=False)
+    model_name = Column(String, nullable=False, index=True)
+    
+    # Alert details
+    alert_type = Column(String, nullable=False)
+    severity = Column(String, nullable=False)
+    metric_name = Column(String, nullable=False)
+    
+    # Values
+    current_value = Column(Float, nullable=False)
+    threshold_value = Column(Float, nullable=False)
+    previous_value = Column(Float)
+    
+    # Status
+    status = Column(String, default='active')
+    acknowledged_at = Column(DateTime)
+    acknowledged_by = Column(String)
+    resolved_at = Column(DateTime)
+    
+    # Timestamps
+    triggered_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    client = relationship("Client", back_populates="performance_alerts")
+
+
+# Update Client model to add relationships
+# Add these lines to the Client class:
+performance_metrics = relationship("PerformanceMetrics", back_populates="client", cascade="all, delete-orphan")
+performance_alerts = relationship("PerformanceAlert", back_populates="client", cascade="all, delete-orphan")
+
 
 if __name__ == "__main__":
     init_db()
