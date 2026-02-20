@@ -1,26 +1,33 @@
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Float, Text, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, JSON, Text, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker
-from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 import os
 
-Base = declarative_base()
+# Database URL from environment variable
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/ai_governance")
 
-# Database URL
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://ai_governance:dev_password_change_in_prod@localhost:5432/ai_governance"
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=20,           # Connection pool for concurrency
+    max_overflow=40,        # Allow up to 60 total connections
+    pool_pre_ping=True,     # Verify connections before use
+    pool_recycle=3600       # Recycle connections every hour
 )
 
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# ══════════════════════════════════════════════════════════
+# DATABASE MODELS (ORM)
+# ══════════════════════════════════════════════════════════
 
 class Client(Base):
-    """Client/Company using the platform"""
     __tablename__ = "clients"
     
     client_id = Column(String, primary_key=True, index=True)
-    company_name = Column(String, nullable=False, unique=True)
-    email = Column(String, unique=True, index=True)
+    company_name = Column(String, nullable=False, unique=True)  # Add unique=True
+    email = Column(String, unique=True, index=True)  # Add this line
     api_key = Column(String, unique=True, nullable=False, index=True)
     api_key_hash = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -33,66 +40,87 @@ class Client(Base):
     predictions = relationship("Prediction", back_populates="client", cascade="all, delete-orphan")
     fairness_audits = relationship("FairnessAudit", back_populates="client")
     drift_alerts = relationship("DriftAlert", back_populates="client")
-    performance_metrics = relationship("PerformanceMetrics", back_populates="client", cascade="all, delete-orphan")
-    performance_alerts = relationship("PerformanceAlert", back_populates="client", cascade="all, delete-orphan")
+    
+    # Relationships
+    predictions = relationship("Prediction", back_populates="client", cascade="all, delete-orphan")
+    fairness_audits = relationship("FairnessAudit", back_populates="client")
+    drift_alerts = relationship("DriftAlert", back_populates="client")
+    performance_metrics = relationship("PerformanceMetrics", back_populates="client", cascade="all, delete-orphan")  # ← ADD THIS
+    performance_alerts = relationship("PerformanceAlert", back_populates="client", cascade="all, delete-orphan")    # ← ADD THIS
 
 
 class Prediction(Base):
-    """Store individual predictions"""
     __tablename__ = "predictions"
     
     id = Column(Integer, primary_key=True, index=True)
-    client_id = Column(String, ForeignKey("clients.client_id"), nullable=False)
-    prediction_id = Column(String, unique=True, nullable=False, index=True)
+    client_id = Column(String, ForeignKey("clients.client_id"), index=True, nullable=False)
+    prediction_id = Column(String, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    model_name = Column(String, nullable=False, index=True)
-    features = Column(JSON, nullable=False)
-    prediction = Column(JSON, nullable=False)
+    model_name = Column(String, index=True)
+    features = Column(JSON)
+    prediction = Column(JSON)
     confidence = Column(Float)
-    metadata = Column(JSON)
-    date_partition = Column(String, index=True)
+    prediction_metadata = Column("metadata", JSON)
     
-    # Ground truth fields
-    actual_outcome = Column(JSON)
-    outcome_timestamp = Column(DateTime)
-    outcome_recorded_by = Column(String)
-    feedback_notes = Column(Text)
+    # Partitioning hint (for future sharding)
+    date_partition = Column(String, index=True)  # YYYY-MM-DD for daily partitions
     
     # Relationships
     client = relationship("Client", back_populates="predictions")
 
 
 class FairnessAudit(Base):
-    """Store fairness audit results"""
     __tablename__ = "fairness_audits"
     
     id = Column(Integer, primary_key=True, index=True)
-    client_id = Column(String, ForeignKey("clients.client_id"), nullable=False)
-    model_name = Column(String, nullable=False, index=True)
-    protected_attribute = Column(String, nullable=False)
+    client_id = Column(String, ForeignKey("clients.client_id"), index=True, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    model_name = Column(String, index=True)
+    protected_attribute = Column(String)
     metrics = Column(JSON)
-    status = Column(String)
+    status = Column(String)  # FAIR, BIAS_DETECTED
     
-    # Relationships
     client = relationship("Client", back_populates="fairness_audits")
 
 
 class DriftAlert(Base):
-    """Store drift detection alerts"""
     __tablename__ = "drift_alerts"
     
     id = Column(Integer, primary_key=True, index=True)
-    client_id = Column(String, ForeignKey("clients.client_id"), nullable=False)
-    model_name = Column(String, nullable=False, index=True)
-    feature = Column(String, nullable=False)
+    client_id = Column(String, ForeignKey("clients.client_id"), index=True, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    drift_score = Column(Float, nullable=False)
-    severity = Column(String)
+    model_name = Column(String, index=True)
+    feature = Column(String)
+    drift_score = Column(Float)
+    severity = Column(String)  # LOW, MEDIUM, HIGH, CRITICAL
     
-    # Relationships
     client = relationship("Client", back_populates="drift_alerts")
 
+
+# ══════════════════════════════════════════════════════════
+# DATABASE INITIALIZATION
+# ══════════════════════════════════════════════════════════
+
+def init_db():
+    """Create all tables"""
+    Base.metadata.create_all(bind=engine)
+    print("✅ Database tables created")
+
+
+def get_db():
+    """Dependency for getting DB session"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Add to existing imports
+from sqlalchemy import Float, Text
+
+# ... existing code ...
+
+# Add after existing models (Client, Prediction, etc.)
 
 class PerformanceMetrics(Base):
     """Store calculated performance metrics"""
@@ -163,23 +191,11 @@ class PerformanceAlert(Base):
     client = relationship("Client", back_populates="performance_alerts")
 
 
-# Database initialization
-def get_engine():
-    return create_engine(DATABASE_URL)
+# Update Client model to add relationships
+# Add these lines to the Client class:
+performance_metrics = relationship("PerformanceMetrics", back_populates="client", cascade="all, delete-orphan")
+performance_alerts = relationship("PerformanceAlert", back_populates="client", cascade="all, delete-orphan")
 
 
-def get_db():
-    engine = get_engine()
-    SessionLocal = sessionmaker(bind=engine)
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-def init_db():
-    """Initialize database tables"""
-    engine = get_engine()
-    Base.metadata.create_all(bind=engine)
-    print("✅ Database initialized")
+if __name__ == "__main__":
+    init_db()
