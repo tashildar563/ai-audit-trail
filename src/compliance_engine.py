@@ -4,8 +4,8 @@ Orchestrates compliance checks and generates reports
 """
 
 from sqlalchemy.orm import Session
-from regulations_db import get_regulation, get_regulations_by_use_case
-from compliance_checks import get_check_function
+from src.regulations_db import get_regulation, get_regulations_by_use_case
+from src.compliance_checks import get_check_function
 from datetime import datetime
 
 

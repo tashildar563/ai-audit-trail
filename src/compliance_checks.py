@@ -5,7 +5,7 @@ Each function checks if a specific requirement is met
 
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from database import Prediction, FairnessAudit, DriftAlert, Client
+from src.database import Prediction, FairnessAudit, DriftAlert, Client
 
 
 # ══════════════════════════════════════════════════════════
