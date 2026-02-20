@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 
 from src.database import get_db, Client, Prediction, FairnessAudit, init_db
+from src.compliance_engine import ComplianceEngine, generate_compliance_summary
+from src.regulations_db import get_all_regulations, get_regulations_by_use_case
 
 # Initialize FastAPI
 app = FastAPI(
@@ -527,6 +529,217 @@ async def get_drift_history(
             for alert in alerts
         ]
     }
+
+# ... existing code ...
+
+# Add these Pydantic models after existing models
+
+class ComplianceCheckRequest(BaseModel):
+    model_name: str
+    regulation_ids: list
+    use_case: Optional[str] = None
+
+
+# ══════════════════════════════════════════════════════════
+# COMPLIANCE ENDPOINTS
+# ══════════════════════════════════════════════════════════
+
+@app.get("/api/v1/compliance/regulations")
+async def list_regulations():
+    """
+    List all available regulations
+    
+    No authentication required - public information
+    """
+    try:
+        regulations = get_all_regulations()
+        
+        # Format for API response
+        result = []
+        for reg_id, regulation in regulations.items():
+            result.append({
+                "id": reg_id,
+                "name": regulation["name"],
+                "jurisdiction": regulation["jurisdiction"],
+                "status": regulation["status"],
+                "effective_date": regulation.get("effective_date"),
+                "description": regulation.get("description"),
+                "applies_to": regulation.get("applies_to", []),
+                "requirements_count": len(regulation.get("requirements", [])),
+                "penalties": regulation.get("penalties", {})
+            })
+        
+        return {
+            "regulations": result,
+            "total_count": len(result)
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/compliance/regulations/by-use-case/{use_case}")
+async def get_regulations_for_use_case(use_case: str):
+    """
+    Get regulations applicable to a specific use case
+    
+    Args:
+        use_case: hiring, credit_scoring, healthcare, etc.
+    
+    No authentication required - public information
+    """
+    try:
+        applicable = get_regulations_by_use_case(use_case)
+        
+        return {
+            "use_case": use_case,
+            "applicable_regulations": applicable,
+            "count": len(applicable)
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/compliance/check")
+async def run_compliance_check(
+    request: ComplianceCheckRequest,
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Run comprehensive compliance check
+    
+    Request body:
+    {
+        "model_name": "loan_approval_v1",
+        "regulation_ids": ["EU_AI_ACT_HIGH_RISK", "NYC_LAW_144"],
+        "use_case": "hiring"  (optional)
+    }
+    
+    Returns:
+        Complete compliance report with scores, issues, and recommendations
+    """
+    try:
+        # Validate regulation IDs
+        all_regs = get_all_regulations()
+        invalid_regs = [r for r in request.regulation_ids if r not in all_regs]
+        
+        if invalid_regs:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Invalid regulation IDs",
+                    "invalid_ids": invalid_regs,
+                    "available_ids": list(all_regs.keys())
+                }
+            )
+        
+        # Run compliance check
+        engine = ComplianceEngine(db)
+        
+        report = engine.check_compliance(
+            client_id=client.client_id,
+            model_name=request.model_name,
+            regulation_ids=request.regulation_ids,
+            use_case=request.use_case
+        )
+        
+        # Add summary text
+        report["summary_text"] = generate_compliance_summary(report)
+        
+        # Increment usage
+        client.usage_count += 1
+        db.commit()
+        
+        return report
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Compliance check failed: {str(e)}"
+        )
+
+
+@app.get("/api/v1/compliance/history")
+async def get_compliance_history(
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+    limit: int = 10
+):
+    """
+    Get compliance check history for this client
+    
+    Note: In this MVP, we return recent fairness audits as proxy
+    In production, you'd store compliance reports in a dedicated table
+    """
+    try:
+        # Get recent fairness audits (as a proxy for compliance history)
+        audits = db.query(FairnessAudit).filter(
+            FairnessAudit.client_id == client.client_id
+        ).order_by(FairnessAudit.timestamp.desc()).limit(limit).all()
+        
+        history = []
+        for audit in audits:
+            history.append({
+                "id": audit.id,
+                "model_name": audit.model_name,
+                "protected_attribute": audit.protected_attribute,
+                "status": audit.status,
+                "timestamp": audit.timestamp.isoformat(),
+                "metrics": audit.metrics
+            })
+        
+        return {
+            "client_id": client.client_id,
+            "history": history,
+            "count": len(history)
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/compliance/report/{model_name}/summary")
+async def get_compliance_summary(
+    model_name: str,
+    regulation_ids: str,  # Comma-separated list
+    client: Client = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Get a quick compliance summary (lighter than full check)
+    
+    Example: /api/v1/compliance/report/loan_model/summary?regulation_ids=EU_AI_ACT_HIGH_RISK,NYC_LAW_144
+    """
+    try:
+        # Parse regulation IDs
+        reg_list = [r.strip() for r in regulation_ids.split(',')]
+        
+        # Run quick check
+        engine = ComplianceEngine(db)
+        report = engine.check_compliance(
+            client_id=client.client_id,
+            model_name=model_name,
+            regulation_ids=reg_list
+        )
+        
+        # Return only summary info
+        return {
+            "model_name": model_name,
+            "overall_score": report["overall_score"],
+            "overall_status": report["overall_status"],
+            "regulations_checked": report["regulations_checked"],
+            "critical_issues_count": report["summary"]["critical_issues_count"],
+            "requirements_passed": report["summary"]["requirements_passed"],
+            "requirements_total": report["summary"]["total_requirements_checked"],
+            "timestamp": report["timestamp"]
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")
 async def startup():
