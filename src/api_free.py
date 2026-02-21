@@ -385,7 +385,7 @@ async def track_prediction(
 
 
 @app.get("/api/v1/usage")
-async def get_usage(client: Client = Depends(verify_api_key)):
+async def get_usage(client: Client = Depends(verify_session_token)):
     """Get usage stats"""
     
     return {
@@ -453,7 +453,7 @@ class DriftCheckRequest(BaseModel):
 @app.post("/api/v1/check_fairness")
 async def check_fairness(
     request: FairnessCheckRequest,
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -556,7 +556,7 @@ async def check_fairness(
 @app.post("/api/v1/detect_drift")
 async def detect_drift(
     request: DriftCheckRequest,
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -637,7 +637,7 @@ async def detect_drift(
 
 @app.get("/api/v1/fairness/history")
 async def get_fairness_history(
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """Get fairness audit history"""
@@ -663,7 +663,7 @@ async def get_fairness_history(
 
 @app.get("/api/v1/drift/history")
 async def get_drift_history(
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """Get drift alert history"""
@@ -760,7 +760,7 @@ async def get_regulations_for_use_case(use_case: str):
 @app.post("/api/v1/compliance/check")
 async def run_compliance_check(
     request: ComplianceCheckRequest,
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -821,7 +821,7 @@ async def run_compliance_check(
 
 @app.get("/api/v1/compliance/history")
 async def get_compliance_history(
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db),
     limit: int = 10
 ):
@@ -862,7 +862,7 @@ async def get_compliance_history(
 async def get_compliance_summary(
     model_name: str,
     regulation_ids: str,  # Comma-separated list
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -1019,7 +1019,7 @@ async def record_actual_outcome(
 @app.post("/api/v1/performance/calculate")
 async def calculate_performance_metrics(
     request: CalculatePerformanceRequest,
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -1105,7 +1105,7 @@ async def calculate_performance_metrics(
 async def get_performance_history(
     model_name: str,
     limit: int = 10,
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -1153,7 +1153,7 @@ async def get_performance_history(
 async def get_performance_alerts(
     status: str = "active",  # active, acknowledged, resolved, all
     limit: int = 20,
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -1209,7 +1209,7 @@ async def get_performance_alerts(
 async def update_alert_status(
     alert_id: int,
     status: str,  # acknowledged, resolved
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -1259,7 +1259,7 @@ async def update_alert_status(
 
 @app.get("/api/v1/performance/summary")
 async def get_performance_summary(
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """
