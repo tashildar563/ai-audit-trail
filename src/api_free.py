@@ -181,7 +181,7 @@ async def logout_client(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
- @app.get("/api/v1/session/verify")
+@app.get("/api/v1/session/verify")
 async def verify_session_endpoint(
     session_token: str = Header(..., alias="X-Session-Token"),
     db: Session = Depends(get_db)
