@@ -92,7 +92,6 @@ def verify_api_key(
 
 class LoginRequest(BaseModel):
  email: str
- company_name: str
  password: str
 
 
