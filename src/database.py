@@ -30,6 +30,16 @@ class Client(Base):
     email = Column(String, unique=True, index=True)  # Add this line
     api_key = Column(String, unique=True, nullable=False, index=True)
     api_key_hash = Column(String, nullable=False)
+
+    # Authentication fields - NEW
+    password_hash = Column(String)
+    current_session_token = Column(String, index=True)
+    session_created_at = Column(DateTime)
+    session_expires_at = Column(DateTime)
+    last_login_at = Column(DateTime)
+    login_count = Column(Integer, default=0)
+
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     plan = Column(String, default="free")
     is_active = Column(Boolean, default=True)

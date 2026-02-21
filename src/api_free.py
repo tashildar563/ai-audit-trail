@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Cookie
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
@@ -13,6 +14,14 @@ import pandas as pd
 from src.database import get_db, Client, Prediction, FairnessAudit, init_db
 from src.compliance_engine import ComplianceEngine, generate_compliance_summary
 from src.regulations_db import get_all_regulations, get_regulations_by_use_case
+# Add these imports at the top
+from src.auth import (
+    hash_password, 
+    verify_password, 
+    create_new_session, 
+    verify_session,
+    invalidate_existing_session
+)
 
 # Initialize FastAPI
 app = FastAPI(
@@ -37,6 +46,7 @@ app.add_middleware(
 class RegisterRequest(BaseModel):
     company_name: str
     email: Optional[str] = None
+    password: str
     plan: str = "free"
 
 
@@ -83,39 +93,146 @@ def verify_api_key(
 class LoginRequest(BaseModel):
  email: str
  company_name: str
+ password: str
 
 
 @app.post("/api/v1/login")
 async def login_client(request: LoginRequest, db: Session = Depends(get_db)):
-    """Login and retrieve API key"""
+    """
+    Login with email and password
     
-    # Find client by email and company name
-    client = db.query(Client).filter(
-        Client.email == request.email,
-        Client.company_name == request.company_name
-    ).first()
+    Request body:
+    {
+        "email": "dev@acme.com",
+        "password": "SecurePassword123!"
+    }
+    
+    Returns:
+    - session_token (store this in localStorage)
+    - Invalidates any existing session (single session enforcement)
+    """
+    try:
+        # Find client by email
+        client = db.query(Client).filter(
+            Client.email == request.email
+        ).first()
+        
+        if not client:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email or password"
+            )
+        
+        # Verify password
+        if not client.password_hash or not verify_password(request.password, client.password_hash):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email or password"
+            )
+        
+        # Check if account is active
+        if not client.is_active:
+            raise HTTPException(
+                status_code=403,
+                detail="Account is inactive. Please contact support."
+            )
+        
+        # Create new session (invalidates any existing session)
+        session_data = create_new_session(db, client)
+        
+        return {
+            "status": "success",
+            "session_token": session_data['session_token'],
+            "expires_at": session_data['expires_at'],
+            "client_id": client.client_id,
+            "email": client.email,
+            "company_name": client.company_name,
+            "plan": client.plan,
+            "message": "Login successful"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/logout")
+async def logout_client(
+    session_token: str = Header(..., alias="X-Session-Token"),
+    db: Session = Depends(get_db)
+):
+    """
+    Logout (invalidate session)
+    
+    Headers:
+    X-Session-Token: your_session_token
+    """
+    try:
+        client = verify_session(db, session_token)
+        
+        if client:
+            invalidate_existing_session(db, client.client_id)
+            return {"status": "success", "message": "Logged out successfully"}
+        else:
+            raise HTTPException(status_code=401, detail="Invalid session")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+ @app.get("/api/v1/session/verify")
+async def verify_session_endpoint(
+    session_token: str = Header(..., alias="X-Session-Token"),
+    db: Session = Depends(get_db)
+):
+    """
+    Verify if session is still valid
+    
+    Headers:
+    X-Session-Token: your_session_token
+    
+    Returns client info if valid, 401 if invalid
+    """
+    try:
+        client = verify_session(db, session_token)
+        
+        if not client:
+            raise HTTPException(status_code=401, detail="Session expired or invalid")
+        
+        return {
+            "valid": True,
+            "client_id": client.client_id,
+            "email": client.email,
+            "company_name": client.company_name,
+            "plan": client.plan,
+            "session_expires_at": client.session_expires_at.isoformat() if client.session_expires_at else None
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Update the dependency for dashboard endpoints
+def verify_session_token(
+    session_token: str = Header(..., alias="X-Session-Token"),
+    db: Session = Depends(get_db)
+) -> Client:
+    """
+    Dependency to verify session token for dashboard endpoints
+    """
+    client = verify_session(db, session_token)
     
     if not client:
         raise HTTPException(
             status_code=401,
-            detail="Invalid credentials. Please check your email and company name."
+            detail="Session expired or invalid. Please login again."
         )
     
-    if not client.is_active:
-        raise HTTPException(
-            status_code=403,
-            detail="Account is inactive. Please contact support."
-        )
-    
-    return {
-        "client_id": client.client_id,
-        "api_key": client.api_key,
-        "company_name": client.company_name,
-        "plan": client.plan,
-        "message": "Login successful!"
-    }
-
-
+    return client
+   
 @app.get("/")
 async def root():
     """API info"""
@@ -140,58 +257,98 @@ async def health():
 
 @app.post("/api/v1/register")
 async def register_client(request: RegisterRequest, db: Session = Depends(get_db)):
-    """Register new client with duplicate prevention"""
+    """
+    Register new client with password
     
-    # Check if company name already exists
-    existing_company = db.query(Client).filter(
-        Client.company_name == request.company_name
-    ).first()
-    
-    if existing_company:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Company name '{request.company_name}' is already registered. Please use a different name or contact support to recover your API key."
-        )
-    
-    # Check if email already exists
-    existing_email = db.query(Client).filter(
-        Client.email == request.email
-    ).first()
-    
-    if existing_email:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Email '{request.email}' is already registered. Please use a different email or login to retrieve your API key."
-        )
-    
-    client_id = f"client_{secrets.token_urlsafe(8)}"
-    api_key = f"sk_{secrets.token_urlsafe(32)}"
-    
-    usage_limits = {"free": 1000, "pro": 10000, "enterprise": 100000}
-    
-    client = Client(
-        client_id=client_id,
-        company_name=request.company_name,
-        api_key=api_key,
-        api_key_hash=secrets.token_hex(32),
-        plan=request.plan,
-        usage_limit=usage_limits.get(request.plan, 1000),
-        email=request.email  # Make sure to add email field to Client model
-    )
-    
-    db.add(client)
-    db.commit()
-    db.refresh(client)
-    
-    return {
-        "client_id": client_id,
-        "api_key": api_key,
-        "company_name": request.company_name,
-        "plan": request.plan,
-        "usage_limit": client.usage_limit,
-        "message": "Save your API key - it won't be shown again!"
+    Request body:
+    {
+        "company_name": "Acme AI Solutions",
+        "email": "dev@acme.com",
+        "password": "SecurePassword123!",
+        "plan": "free"
     }
-
+    
+    Returns:
+    - client_id
+    - api_key (for API access)
+    - session_token (for dashboard access)
+    """
+    try:
+        # Validate password strength
+        if len(request.password) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail="Password must be at least 8 characters long"
+            )
+        
+        # Check if company name already exists
+        existing_company = db.query(Client).filter(
+            Client.company_name == request.company_name
+        ).first()
+        
+        if existing_company:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Company name '{request.company_name}' is already registered"
+            )
+        
+        # Check if email already exists
+        existing_email = db.query(Client).filter(
+            Client.email == request.email
+        ).first()
+        
+        if existing_email:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Email '{request.email}' is already registered"
+            )
+        
+        # Generate IDs
+        client_id = f"client_{secrets.token_urlsafe(8)}"
+        api_key = f"sk_{secrets.token_urlsafe(32)}"
+        api_key_hash = secrets.token_hex(32)
+        
+        # Hash password
+        password_hash = hash_password(request.password)
+        
+        # Set usage limits
+        usage_limits = {"free": 1000, "pro": 50000, "enterprise": 100000}
+        
+        # Create client
+        client = Client(
+            client_id=client_id,
+            company_name=request.company_name,
+            email=request.email,
+            api_key=api_key,
+            api_key_hash=api_key_hash,
+            password_hash=password_hash,
+            plan=request.plan,
+            usage_limit=usage_limits.get(request.plan, 1000)
+        )
+        
+        db.add(client)
+        db.commit()
+        db.refresh(client)
+        
+        # Create initial session
+        session_data = create_new_session(db, client)
+        
+        return {
+            "client_id": client_id,
+            "api_key": api_key,
+            "session_token": session_data['session_token'],
+            "expires_at": session_data['expires_at'],
+            "company_name": request.company_name,
+            "email": request.email,
+            "plan": request.plan,
+            "usage_limit": client.usage_limit,
+            "message": "Registration successful! Save your API key - it won't be shown again."
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/track_prediction")
 async def track_prediction(
@@ -247,7 +404,7 @@ async def get_usage(client: Client = Depends(verify_api_key)):
 
 @app.get("/api/v1/dashboard")
 async def get_dashboard(
-    client: Client = Depends(verify_api_key),
+    client: Client = Depends(verify_session_token),
     db: Session = Depends(get_db)
 ):
     """Get dashboard summary"""
